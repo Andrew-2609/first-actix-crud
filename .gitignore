@@ -1,1 +1,5 @@
+# Environment
+.env
+
+# Generated Files
 /target
