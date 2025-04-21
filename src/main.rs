@@ -11,7 +11,7 @@ use serde_json::json;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TaskRow {
     task_id: i32,
     name: String,
@@ -42,7 +42,7 @@ async fn get_task(
     Path(task_id): Path<i32>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
     let row = sqlx::query_as!(TaskRow, "SELECT * FROM tasks WHERE task_id = $1", task_id)
-        .fetch_one(&pg_pool)
+        .fetch_optional(&pg_pool)
         .await
         .map_err(|e| {
             (
@@ -50,6 +50,13 @@ async fn get_task(
                 json!({"success": false, "message": e.to_string()}).to_string(),
             )
         })?;
+
+    if row.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            json!({"message": format!("Task {task_id} not found")}).to_string(),
+        ));
+    }
 
     Ok((
         StatusCode::OK,
@@ -104,11 +111,32 @@ async fn update_task(
     Path(task_id): Path<i32>,
     Json(task): Json<UpdateTaskReq>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let original_task = sqlx::query_as!(TaskRow, "SELECT * FROM tasks WHERE task_id = $1", task_id)
+        .fetch_optional(&pg_pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"success": false, "message": e.to_string()}).to_string(),
+            )
+        })?;
+
+    if original_task.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            json!({"message": format!("Task {task_id} not found")}).to_string(),
+        ));
+    }
+
+    let original_task = original_task.unwrap();
+    let task_name = task.name.unwrap_or(original_task.name);
+    let task_priority = task.priority.or(original_task.priority);
+
     sqlx::query!(
         "UPDATE tasks SET name = $2, priority = $3 WHERE task_id = $1",
         task_id,
-        task.name,
-        task.priority
+        task_name,
+        task_priority
     )
     .execute(&pg_pool)
     .await
