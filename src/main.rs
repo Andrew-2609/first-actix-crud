@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use sqlx::{Error, Pool, Postgres, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 
 #[derive(Clone, Serialize)]
@@ -16,6 +16,40 @@ struct TaskRow {
     task_id: i32,
     name: String,
     priority: Option<i32>,
+}
+
+async fn load_task_by_id(
+    pg_pool: &Pool<Postgres>,
+    task_id: &i32,
+) -> Result<Option<TaskRow>, Error> {
+    sqlx::query_as!(TaskRow, "SELECT * FROM tasks WHERE task_id = $1", task_id)
+        .fetch_optional(pg_pool)
+        .await
+}
+
+fn map_pg_error(pg_err: sqlx::Error) -> (StatusCode, String) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"success": false, "message": pg_err.to_string()}).to_string(),
+    )
+}
+
+fn build_not_found_error(task_id: i32) -> (StatusCode, String) {
+    (
+        StatusCode::NOT_FOUND,
+        json!({"message": format!("Task {task_id} not found")}).to_string(),
+    )
+}
+
+fn map_success(status_code: StatusCode, data: Option<impl Serialize>) -> (StatusCode, String) {
+    if data.is_none() {
+        return (status_code, json!({"success": true}).to_string());
+    }
+
+    (
+        status_code,
+        json!({"success": true, "data": data}).to_string(),
+    )
 }
 
 async fn get_tasks(
@@ -41,27 +75,15 @@ async fn get_task(
     State(pg_pool): State<Pool<Postgres>>,
     Path(task_id): Path<i32>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let row = sqlx::query_as!(TaskRow, "SELECT * FROM tasks WHERE task_id = $1", task_id)
-        .fetch_optional(&pg_pool)
+    let task = load_task_by_id(&pg_pool, &task_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"success": false, "message": e.to_string()}).to_string(),
-            )
-        })?;
+        .map_err(map_pg_error)?;
 
-    if row.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            json!({"message": format!("Task {task_id} not found")}).to_string(),
-        ));
+    if task.is_none() {
+        return Err(build_not_found_error(task_id));
     }
 
-    Ok((
-        StatusCode::OK,
-        json!({"success": true, "data": row}).to_string() + "\n",
-    ))
+    Ok(map_success(StatusCode::OK, task))
 }
 
 #[derive(Deserialize)]
@@ -87,17 +109,9 @@ async fn create_task(
     )
     .fetch_one(&pg_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"success": false, "message": e.to_string()}).to_string(),
-        )
-    })?;
+    .map_err(map_pg_error)?;
 
-    Ok((
-        StatusCode::OK,
-        json!({"success": true, "data": row}).to_string() + "\n",
-    ))
+    Ok(map_success(StatusCode::OK, Some(row)))
 }
 
 #[derive(Deserialize)]
@@ -111,21 +125,12 @@ async fn update_task(
     Path(task_id): Path<i32>,
     Json(task): Json<UpdateTaskReq>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let original_task = sqlx::query_as!(TaskRow, "SELECT * FROM tasks WHERE task_id = $1", task_id)
-        .fetch_optional(&pg_pool)
+    let original_task = load_task_by_id(&pg_pool, &task_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"success": false, "message": e.to_string()}).to_string(),
-            )
-        })?;
+        .map_err(map_pg_error)?;
 
     if original_task.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            json!({"message": format!("Task {task_id} not found")}).to_string(),
-        ));
+        return Err(build_not_found_error(task_id));
     }
 
     let original_task = original_task.unwrap();
@@ -140,12 +145,7 @@ async fn update_task(
     )
     .execute(&pg_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"success": false, "message": e.to_string()}).to_string(),
-        )
-    })?;
+    .map_err(map_pg_error)?;
 
     Ok((StatusCode::OK, json!({"success": true}).to_string()))
 }
@@ -157,14 +157,9 @@ async fn delete_task(
     sqlx::query!("DELETE FROM tasks WHERE task_id = $1", task_id)
         .execute(&pg_pool)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"success": false, "message": e.to_string()}).to_string(),
-            )
-        })?;
+        .map_err(map_pg_error)?;
 
-    Ok((StatusCode::OK, json!({"success": true}).to_string()))
+    Ok(map_success(StatusCode::OK, None::<()>))
 }
 
 #[tokio::main]
